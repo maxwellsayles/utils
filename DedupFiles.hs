@@ -1,11 +1,21 @@
+{- | Print out duplicate files.
+
+Given a directory, find all duplicate files in subdirectories.  Two files are
+duplicates if they have the same file name and the same MD5 sum.
+
+I've used this utility to deduplicate photos.  I've downloaded photos from my
+camera without wiping the camera.  Later I would redownload the photos from the
+same camera.  This caused photos to be duplicated on storage.
+-}
+
 import Control.Applicative
 import Control.Arrow
 import Control.Monad
 import qualified Data.ByteString as BS
-import Data.Digest.OpenSSL.MD5
+import Data.Digest.OpenSSL.MD5 (md5sum)
 import Data.Function (on)
 import Data.List (groupBy, sortBy)
-import Data.Ord
+import Data.Ord (comparing)
 import System.Environment (getArgs)
 import System.FilePath.Posix (takeFileName)
 import System.Process (readProcessWithExitCode)
@@ -41,7 +51,7 @@ dedupPaths paths = do
              zip dupHashes dupFiles
 
   putStrLn ""
-  forM_ dups $ \v -> mapM putStrLn v >> putStrLn ""
+  forM_ dups $ \v -> mapM_ putStrLn v >> putStrLn ""
 
 main :: IO ()
 main = do
