@@ -1,28 +1,55 @@
 {-# LANGUAGE RecordWildCards #-}
 import Control.Applicative
+import Control.Exception
 import Control.Monad
+import Data.Time.Clock (UTCTime)
 import System.Directory
 import System.FilePath
-import System.Posix.Files
 
 import qualified Data.Set as S
+import qualified System.Posix.Files as Posix
 
 data Env = Env { srcPath :: FilePath
                , dstPath :: FilePath
                , dryRun :: Bool
                }
 
+data Meta = Meta { metaPath :: String
+                 , metaSize :: Integer
+                 , metaDate :: UTCTime
+                 } deriving (Eq, Ord)
+
+getMeta :: FilePath -> IO Meta
+getMeta fp = Meta <$> pure fp <*> getFileSize fp <*> getModificationTime fp
+
 listContents :: FilePath -> IO [FilePath]
-listContents fp = do
-  exists <- doesDirectoryExist fp
-  files <- if exists then listDirectory fp else return []
-  return $! if fp /= "." then map (fp </>) files else files
+listContents fp = 
+  -- TODO: Report exception
+  handle (\(SomeException _) -> return []) $ do
+    exists <- doesDirectoryExist fp
+    files <- if exists then listDirectory fp else return []
+    return $! if fp /= "." then map (fp </>) files else files
+
+isRegularFile :: FilePath -> IO Bool
+isRegularFile fp =
+  -- TODO: Report exception
+  handle (\(SomeException _) -> return False) $
+  (Posix.isRegularFile <$> Posix.getSymbolicLinkStatus fp)
+
+isDirectory :: FilePath -> IO Bool
+isDirectory fp =
+  -- TODO: Report exception
+  handle (\(SomeException _) -> return False) $
+  (Posix.isDirectory <$> Posix.getSymbolicLinkStatus fp)
 
 listFiles :: FilePath -> IO [FilePath]
-listFiles = listContents >=> filterM (\f -> isRegularFile <$> getFileStatus f)
+listFiles = filterM isRegularFile <=< listContents
+
+listFilesWithMeta :: FilePath -> IO [Meta]
+listFilesWithMeta = mapM getMeta <=< listFiles
 
 listDirs :: FilePath -> IO [FilePath]
-listDirs = listContents >=> filterM (\f -> isDirectory <$> getFileStatus f)
+listDirs = filterM isDirectory <=< listContents
 
 cpFile :: Env -> FilePath -> IO ()
 cpFile (Env {..}) path = do
@@ -50,15 +77,18 @@ rmDir (Env {..}) path = do
 
 syncFiles :: Env -> FilePath -> IO ()
 syncFiles env@(Env {..}) path = do
-  srcFiles <- S.fromList <$> (withCurrentDirectory srcPath $ listFiles path)
-  dstFiles <- S.fromList <$> (withCurrentDirectory dstPath $ listFiles path)
+  srcMeta <- S.fromList <$>
+             (withCurrentDirectory srcPath $ listFilesWithMeta path)
+  dstMeta <- S.fromList <$>
+             (withCurrentDirectory dstPath $ listFilesWithMeta path)
 
   -- cp missing files to dst
-  -- TODO: Grab metadata for src + dst before taking difference
-  let cpFiles = srcFiles `S.difference` dstFiles
+  let cpFiles = S.map metaPath $ srcMeta `S.difference` dstMeta
   mapM_ (cpFile env) cpFiles
 
   -- rm extra files in dst
+  let srcFiles = S.map metaPath srcMeta
+  let dstFiles = S.map metaPath dstMeta
   let rmFiles = dstFiles `S.difference` srcFiles
   mapM_ (rmFile env) rmFiles
   
@@ -81,5 +111,13 @@ syncDir env@(Env {..}) path = do
 
 main :: IO ()
 main = do
-  let env = Env "/home/max/" "/home/max/tmp2" False
-  syncDir env "tmp"
+  let srcPath = "/home"
+      dstPath = "/home/tmp"
+      dryRun = False
+      env = Env srcPath dstPath dryRun
+      path = "max"
+
+  exists <- doesDirectoryExist $ dstPath </> path
+  when (not exists) $ mkDir env path
+
+  syncDir env path
