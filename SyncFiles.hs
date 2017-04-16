@@ -5,6 +5,7 @@ import Control.Monad
 import Data.Time.Clock (UTCTime)
 import System.Directory
 import System.FilePath
+import System.Posix.Types (EpochTime)
 
 import qualified Data.Set as S
 import qualified System.Posix.Files as Posix
@@ -16,30 +17,48 @@ data Env = Env { srcPath :: FilePath
 
 data Meta = Meta { metaPath :: String
                  , metaSize :: Integer
-                 , metaDate :: UTCTime
-                 } deriving (Eq, Ord)
+                 , metaATime :: EpochTime
+                 , metaMTime :: EpochTime
+                 }
+
+instance Eq Meta where
+  a == b = metaPath a == metaPath b &&
+           metaSize a == metaSize b &&
+           metaMTime a == metaMTime b
+
+instance Ord Meta where
+  a `compare` b
+    | metaPath a /= metaPath b = metaPath a `compare` metaPath b
+    | metaSize a /= metaSize b = metaSize a `compare` metaSize b
+    | otherwise = metaMTime a `compare` metaMTime b
+
+handleIOException :: IO a -> IO a -> IO a
+handleIOException excResult result =
+  handle (\(SomeException e) -> print e >> excResult) result
 
 getMeta :: FilePath -> IO Meta
-getMeta fp = Meta <$> pure fp <*> getFileSize fp <*> getModificationTime fp
+getMeta fp = do
+  status <- Posix.getSymbolicLinkStatus fp
+  let atime = Posix.accessTime status
+      mtime = Posix.modificationTime status
+  size <- getFileSize fp
+  return $! Meta fp size atime mtime
 
 listContents :: FilePath -> IO [FilePath]
 listContents fp = 
-  -- TODO: Report exception
-  handle (\(SomeException _) -> return []) $ do
+  handleIOException (return []) $ do
     exists <- doesDirectoryExist fp
     files <- if exists then listDirectory fp else return []
     return $! if fp /= "." then map (fp </>) files else files
 
 isRegularFile :: FilePath -> IO Bool
 isRegularFile fp =
-  -- TODO: Report exception
-  handle (\(SomeException _) -> return False) $
+  handleIOException (return False) $
   (Posix.isRegularFile <$> Posix.getSymbolicLinkStatus fp)
 
 isDirectory :: FilePath -> IO Bool
 isDirectory fp =
-  -- TODO: Report exception
-  handle (\(SomeException _) -> return False) $
+  handleIOException (return False) $
   (Posix.isDirectory <$> Posix.getSymbolicLinkStatus fp)
 
 listFiles :: FilePath -> IO [FilePath]
@@ -51,29 +70,42 @@ listFilesWithMeta = mapM getMeta <=< listFiles
 listDirs :: FilePath -> IO [FilePath]
 listDirs = filterM isDirectory <=< listContents
 
-cpFile :: Env -> FilePath -> IO ()
-cpFile (Env {..}) path = do
-  putStrLn $ ("cp " ++) $ srcPath </> path
-  when (not dryRun) $ do
-    copyFileWithMetadata (srcPath </> path) (dstPath </> path)
+cpFile :: Env -> Meta -> IO ()
+cpFile (Env {..}) meta = do
+  let path = metaPath meta
+      src = srcPath </> path
+      dst = dstPath </> path
+  putStrLn $ ("cp " ++) src
+  when (not dryRun) $
+    handleIOException (return ()) $ do
+      -- NOTE: System.Directory.setModificationTime didn't work over SMB so we
+      -- use the System.Posix.Files methods instead
+      copyFile src dst
+      Posix.setFileTimes dst (metaATime meta) (metaMTime meta)
 
 rmFile :: Env -> FilePath -> IO ()
 rmFile (Env {..}) path = do
   let path' = dstPath </> path
   putStrLn $ "rm " ++ path'
-  when (not dryRun) $ removeFile path'
+  when (not dryRun) $
+    handleIOException (return ()) $
+    removeFile path'
 
 mkDir :: Env -> FilePath -> IO ()
 mkDir (Env {..}) path = do
   let path' = dstPath </> path
   putStrLn $ "mkdir " ++ path'
-  when (not dryRun) $ createDirectoryIfMissing False path'
+  when (not dryRun) $
+    handleIOException (return ()) $
+    createDirectoryIfMissing False path'
 
 rmDir :: Env -> FilePath -> IO ()
 rmDir (Env {..}) path = do
   let path' = dstPath </> path
   putStrLn $ "rm -rf " ++ path'
-  when (not dryRun) $ removePathForcibly path'
+  when (not dryRun) $
+    handleIOException (return ()) $
+    removePathForcibly path'
 
 syncFiles :: Env -> FilePath -> IO ()
 syncFiles env@(Env {..}) path = do
@@ -83,13 +115,13 @@ syncFiles env@(Env {..}) path = do
              (withCurrentDirectory dstPath $ listFilesWithMeta path)
 
   -- cp missing files to dst
-  let cpFiles = S.map metaPath $ srcMeta `S.difference` dstMeta
+  let cpFiles = srcMeta `S.difference` dstMeta
   mapM_ (cpFile env) cpFiles
 
   -- rm extra files in dst
   let srcFiles = S.map metaPath srcMeta
-  let dstFiles = S.map metaPath dstMeta
-  let rmFiles = dstFiles `S.difference` srcFiles
+      dstFiles = S.map metaPath dstMeta
+      rmFiles = dstFiles `S.difference` srcFiles
   mapM_ (rmFile env) rmFiles
   
 syncDir :: Env -> FilePath -> IO ()
@@ -112,7 +144,7 @@ syncDir env@(Env {..}) path = do
 main :: IO ()
 main = do
   let srcPath = "/home"
-      dstPath = "/home/tmp"
+      dstPath = "/var/run/user/1000/gvfs/smb-share:server=dns-325.local,share=volume_1/home"
       dryRun = False
       env = Env srcPath dstPath dryRun
       path = "max"
