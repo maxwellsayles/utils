@@ -2,7 +2,9 @@
 import Control.Applicative
 import Control.Exception
 import Control.Monad
+import Data.Semigroup ((<>))
 import Data.Time.Clock (UTCTime)
+import Options.Applicative
 import System.Directory
 import System.FilePath
 import System.Posix.Types (EpochTime)
@@ -10,9 +12,10 @@ import System.Posix.Types (EpochTime)
 import qualified Data.Set as S
 import qualified System.Posix.Files as Posix
 
-data Env = Env { srcPath :: FilePath
+data Env = Env { dryRun :: Bool
+               , srcPath :: FilePath
                , dstPath :: FilePath
-               , dryRun :: Bool
+               , initSubdir :: FilePath
                }
 
 data Meta = Meta { metaPath :: String
@@ -32,8 +35,8 @@ instance Ord Meta where
     | metaSize a /= metaSize b = metaSize a `compare` metaSize b
     | otherwise = metaMTime a `compare` metaMTime b
 
-handleIOException :: IO a -> IO a -> IO a
-handleIOException excResult result =
+handleException :: IO a -> IO a -> IO a
+handleException excResult result =
   handle (\(SomeException e) -> print e >> excResult) result
 
 getMeta :: FilePath -> IO Meta
@@ -46,19 +49,19 @@ getMeta fp = do
 
 listContents :: FilePath -> IO [FilePath]
 listContents fp = 
-  handleIOException (return []) $ do
+  handleException (return []) $ do
     exists <- doesDirectoryExist fp
     files <- if exists then listDirectory fp else return []
     return $! if fp /= "." then map (fp </>) files else files
 
 isRegularFile :: FilePath -> IO Bool
 isRegularFile fp =
-  handleIOException (return False) $
+  handleException (return False) $
   (Posix.isRegularFile <$> Posix.getSymbolicLinkStatus fp)
 
 isDirectory :: FilePath -> IO Bool
 isDirectory fp =
-  handleIOException (return False) $
+  handleException (return False) $
   (Posix.isDirectory <$> Posix.getSymbolicLinkStatus fp)
 
 listFiles :: FilePath -> IO [FilePath]
@@ -77,9 +80,10 @@ cpFile (Env {..}) meta = do
       dst = dstPath </> path
   putStrLn $ ("cp " ++) src
   when (not dryRun) $
-    handleIOException (return ()) $ do
+    handleException (return ()) $ do
       -- NOTE: System.Directory.setModificationTime didn't work over SMB so we
       -- use the System.Posix.Files methods instead
+      -- TODO: Make copying optional, so I can just sync mtime
       copyFile src dst
       Posix.setFileTimes dst (metaATime meta) (metaMTime meta)
 
@@ -88,7 +92,7 @@ rmFile (Env {..}) path = do
   let path' = dstPath </> path
   putStrLn $ "rm " ++ path'
   when (not dryRun) $
-    handleIOException (return ()) $
+    handleException (return ()) $
     removeFile path'
 
 mkDir :: Env -> FilePath -> IO ()
@@ -96,7 +100,7 @@ mkDir (Env {..}) path = do
   let path' = dstPath </> path
   putStrLn $ "mkdir " ++ path'
   when (not dryRun) $
-    handleIOException (return ()) $
+    handleException (return ()) $
     createDirectoryIfMissing False path'
 
 rmDir :: Env -> FilePath -> IO ()
@@ -104,7 +108,7 @@ rmDir (Env {..}) path = do
   let path' = dstPath </> path
   putStrLn $ "rm -rf " ++ path'
   when (not dryRun) $
-    handleIOException (return ()) $
+    handleException (return ()) $
     removePathForcibly path'
 
 syncFiles :: Env -> FilePath -> IO ()
@@ -141,15 +145,20 @@ syncDir env@(Env {..}) path = do
   -- rmdir extra dst dirs
   mapM_ (rmDir env) $ dstDirs `S.difference` srcDirs
 
+opts :: ParserInfo Env
+opts = info (cmdLineOptions <**> helper)
+       (fullDesc
+        <> progDesc "Recursively sync files between two directories.")
+  where cmdLineOptions = Env
+                         <$> switch (long "dry-run")
+                         <*> argument str (metavar "<src-path>")
+                         <*> argument str (metavar "<dst-path>")
+                         <*> argument str (metavar "<init-subdir>")
+
 main :: IO ()
 main = do
-  let srcPath = "/home"
-      dstPath = "/var/run/user/1000/gvfs/smb-share:server=dns-325.local,share=volume_1/home"
-      dryRun = False
-      env = Env srcPath dstPath dryRun
-      path = "max"
-
-  exists <- doesDirectoryExist $ dstPath </> path
+  env <- execParser opts
+  let path = initSubdir env
+  exists <- doesDirectoryExist $ dstPath env </> path
   when (not exists) $ mkDir env path
-
   syncDir env path
