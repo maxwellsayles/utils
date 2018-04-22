@@ -1,17 +1,17 @@
 {- | Print out files with matching SHA256 hashes. -}
 
-import Control.Applicative
+import Control.Applicative ((<$>))
 import Control.Exception
 import Control.Monad
 import Crypto.Hash.SHA256 (hashlazy)
 import Data.Function (on)
 import Data.List (groupBy, sortBy)
 import Data.Ord (comparing)
-import System.Directory
+import System.Directory (doesDirectoryExist, listDirectory)
 import System.Environment (getArgs)
-import System.FilePath
+import System.FilePath ((</>))
 import System.IO (hFlush, stdout)
-import Text.Printf
+import Text.Printf (printf)
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
@@ -64,6 +64,7 @@ hashFiles _ n acc [] = do
   return acc
 hashFiles i n acc (path:paths) = do
   printf "\rHashing %d / %d." i n
+  hFlush stdout
   hash <- hashlazy <$> BSL.readFile path
   hash `seq` hashFiles (i + 1) n ((hash, path) : acc) paths
 
