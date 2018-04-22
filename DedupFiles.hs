@@ -1,59 +1,91 @@
-{- | Print out duplicate files.
-
-Given a directory, find all duplicate files in subdirectories.  Two files are
-duplicates if they have the same file name and the same MD5 sum.
-
-I've used this utility to deduplicate photos.  I've downloaded photos from my
-camera without wiping the camera.  Later I would redownload the photos from the
-same camera.  This caused photos to be duplicated on storage.
--}
+{- | Print out files with matching SHA256 hashes. -}
 
 import Control.Applicative
-import Control.Arrow
+import Control.Exception
 import Control.Monad
-import qualified Data.ByteString as BS
-import Data.Digest.OpenSSL.MD5 (md5sum)
+import Crypto.Hash.SHA256 (hashlazy)
 import Data.Function (on)
 import Data.List (groupBy, sortBy)
 import Data.Ord (comparing)
+import System.Directory
 import System.Environment (getArgs)
-import System.FilePath.Posix (takeFileName)
-import System.Process (readProcessWithExitCode)
-import System.Exit
+import System.FilePath
+import System.IO (hFlush, stdout)
+import Text.Printf
+
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
+import qualified Data.Set as S
+import qualified System.Posix.Files as Posix
 
 usage :: IO ()
 usage = putStrLn "Usage: DedupFiles <path>"
 
-doit :: String -> IO ()
-doit path = do
-  (exitCode, out, err) <- readProcessWithExitCode "find" [path, "-type", "f"] ""
-  case exitCode of
-    ExitFailure _ -> putStrLn err
-    ExitSuccess -> dedupPaths $ lines out
+handleException :: IO a -> IO a -> IO a
+handleException excResult result =
+  handle (\(SomeException e) -> print e >> excResult) result
 
-dedupPaths :: [String] -> IO ()
-dedupPaths paths = do
-  let dupFiles = concat $
-                 filter ((>1) . length) $
-                 map (map snd) $
-                 groupBy ((==) `on` fst) $
-                 sortBy (comparing fst) $
-                 map (takeFileName &&& id) paths
-  
-  putStrLn $ "Computing the MD5 sum of " ++ show (length dupFiles) ++ " files."
-  dupHashes <- mapM (\path -> do
-                        hash <- md5sum <$> BS.readFile path
-                        return $! hash) dupFiles
-  let dups = filter ((>1) . length) $
+listContents :: FilePath -> IO [FilePath]
+listContents fp = 
+  handleException (return []) $ do
+    exists <- doesDirectoryExist fp
+    files <- if exists then listDirectory fp else return []
+    return $! if fp /= "." then map (fp </>) files else files
+
+isRegularFile :: FilePath -> IO Bool
+isRegularFile fp =
+  handleException (return False) $
+  (Posix.isRegularFile <$> Posix.getSymbolicLinkStatus fp)
+
+isDirectory :: FilePath -> IO Bool
+isDirectory fp =
+  handleException (return False) $
+  (Posix.isDirectory <$> Posix.getSymbolicLinkStatus fp)
+
+listFiles :: FilePath -> IO [FilePath]
+listFiles = filterM isRegularFile <=< listContents
+
+listDirs :: FilePath -> IO [FilePath]
+listDirs = filterM isDirectory <=< listContents
+
+listFilesRecursive :: FilePath -> IO [FilePath]
+listFilesRecursive path = do
+  files <- listFiles path
+  subDirFiles <- mapM listFilesRecursive =<< listDirs path
+  return $ files ++ concat subDirFiles
+
+hashFiles :: Int
+          -> Int
+          -> [(BS.ByteString, FilePath)]
+          -> [FilePath]
+          -> IO [(BS.ByteString, FilePath)]
+hashFiles _ n acc [] = do
+  printf "\x1b[2K\rDone hashing %d files.\n" n
+  return acc
+hashFiles i n acc (path:paths) = do
+  printf "\rHashing %d / %d." i n
+  hash <- hashlazy <$> BSL.readFile path
+  hash `seq` hashFiles (i + 1) n ((hash, path) : acc) paths
+
+printDuplicates :: [FilePath] -> IO ()
+printDuplicates path = do
+  mapM_ putStrLn path
+  putStrLn ""
+
+dedup :: String -> IO ()
+dedup path = do
+  files <- listFilesRecursive path
+  hashes <- hashFiles 0 (length files) [] files
+  let dups = filter ((> 1) . length) $
              map (map snd) $
              groupBy ((==) `on` fst) $
-             sortBy (comparing fst) $
-             zip dupHashes dupFiles
+             sortBy (comparing fst) hashes
 
-  putStrLn ""
-  forM_ dups $ \v -> mapM_ putStrLn v >> putStrLn ""
+  mapM_ printDuplicates dups
 
 main :: IO ()
 main = do
   args <- getArgs
-  if length args /= 1 then usage else doit (head args)
+  if length args /= 1
+    then usage
+    else dedup $ head args
