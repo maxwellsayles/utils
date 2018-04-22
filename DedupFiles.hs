@@ -1,4 +1,7 @@
-{- | Print out files with matching SHA256 hashes. -}
+{- |
+Print out files with matching SHA256 hashes. Verify the contents of
+potential matches
+-}
 
 import Control.Applicative ((<$>))
 import Control.Exception
@@ -68,9 +71,18 @@ hashFiles i n acc (path:paths) = do
   hash <- hashlazy <$> BSL.readFile path
   hash `seq` hashFiles (i + 1) n ((hash, path) : acc) paths
 
+verifyDups :: [FilePath] -> IO Bool
+verifyDups [] = return True
+verifyDups [_] = return True
+verifyDups xs = do
+  blobs <- mapM BSL.readFile xs
+  return $! all (== (head blobs)) (tail blobs)
+
 printDuplicates :: [FilePath] -> IO ()
-printDuplicates path = do
-  mapM_ putStrLn $ sort path
+printDuplicates files = do
+  verified <- verifyDups files
+  when (not verified) $ printf "File contents are not identical"
+  mapM_ putStrLn $ sort files
   putStrLn ""
 
 dedup :: String -> IO ()
@@ -81,7 +93,6 @@ dedup path = do
              map (map snd) $
              groupBy ((==) `on` fst) $
              sortBy (comparing fst) hashes
-
   mapM_ printDuplicates dups
 
 main :: IO ()
