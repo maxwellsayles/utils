@@ -5,7 +5,7 @@ import Control.Exception
 import Control.Monad
 import Crypto.Hash.SHA256 (hashlazy)
 import Data.Function (on)
-import Data.List (groupBy, sortBy)
+import Data.List (groupBy, sort, sortBy)
 import Data.Ord (comparing)
 import System.Directory (doesDirectoryExist, listDirectory)
 import System.Environment (getArgs)
@@ -70,7 +70,7 @@ hashFiles i n acc (path:paths) = do
 
 printDuplicates :: [FilePath] -> IO ()
 printDuplicates path = do
-  mapM_ putStrLn path
+  mapM_ putStrLn $ sort path
   putStrLn ""
 
 dedup :: String -> IO ()
