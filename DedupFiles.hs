@@ -29,7 +29,7 @@ handleException excResult result =
   handle (\(SomeException e) -> print e >> excResult) result
 
 listContents :: FilePath -> IO [FilePath]
-listContents fp = 
+listContents fp =
   handleException (return []) $ do
     exists <- doesDirectoryExist fp
     files <- if exists then listDirectory fp else return []
